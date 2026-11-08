@@ -36,6 +36,7 @@ jobs:
       - name: Grype, zero findings of any severity
         run: |
           docker save ui:ci -o "$RUNNER_TEMP/ui.tar"
+          chmod a+r "$RUNNER_TEMP/ui.tar" # grype runs as a non-root user
           docker run --rm -v "$RUNNER_TEMP/ui.tar:/ui.tar:ro" "$GRYPE" docker-archive:/ui.tar -o json > "$RUNNER_TEMP/grype.json"
           jq -r '.matches[] | "\(.vulnerability.severity) \(.vulnerability.id) \(.artifact.name)@\(.artifact.version)"' "$RUNNER_TEMP/grype.json"
           jq -e '.matches | length == 0' "$RUNNER_TEMP/grype.json"
