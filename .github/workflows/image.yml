@@ -1,0 +1,78 @@
+name: image
+
+# Rebuilds the scratch image of this fork. The weekly run picks up a patched
+# node:24-alpine; a new upstream release means rebasing this branch and
+# bumping UPSTREAM_VERSION.
+on:
+  push:
+    branches:
+      - build
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: image
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  UPSTREAM_VERSION: v26.2.0
+  GRYPE: anchore/grype:v0.121.0-debug@sha256:dd3d322f1f0ed0a5b09a26a25433f1c1273f075e2b2aea0078cddb09c0ad9b68
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build --pull -t ui:ci .
+      - name: Grype, zero findings of any severity
+        run: |
+          docker save ui:ci -o "$RUNNER_TEMP/ui.tar"
+          docker run --rm -v "$RUNNER_TEMP/ui.tar:/ui.tar:ro" "$GRYPE" docker-archive:/ui.tar -o json > "$RUNNER_TEMP/grype.json"
+          jq -r '.matches[] | "\(.vulnerability.severity) \(.vulnerability.id) \(.artifact.name)@\(.artifact.version)"' "$RUNNER_TEMP/grype.json"
+          jq -e '.matches | length == 0' "$RUNNER_TEMP/grype.json"
+      - name: Smoke test against Kratos v1.3.1
+        run: ci/smoke.sh ui:ci
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Build, push, sign
+        uses: meysam81/build-docker@4702dd58cc9a0c0499fbdfe1e1bf8c23d4bc7c8c # main
+        with:
+          checkout: false
+          cosign: true
+          image-name: ${{ env.IMAGE }}
+          image-extra-tags: |
+            ${{ env.IMAGE }}:${{ env.UPSTREAM_VERSION }}
+            ${{ env.IMAGE }}:${{ github.sha }}
+          platforms: linux/amd64,linux/arm64
+          pull: true
+      - name: Grype every published platform
+        env:
+          GRYPE_REGISTRY_AUTH_AUTHORITY: ghcr.io
+          GRYPE_REGISTRY_AUTH_USERNAME: ${{ github.actor }}
+          GRYPE_REGISTRY_AUTH_PASSWORD: ${{ github.token }}
+        run: |
+          for p in linux/amd64 linux/arm64; do
+            docker run --rm -e GRYPE_REGISTRY_AUTH_AUTHORITY -e GRYPE_REGISTRY_AUTH_USERNAME -e GRYPE_REGISTRY_AUTH_PASSWORD \
+              "$GRYPE" "registry:$IMAGE:$GITHUB_SHA" --platform "$p" -o json > "$RUNNER_TEMP/grype.json"
+            echo "$p: $(jq '.matches | length' "$RUNNER_TEMP/grype.json") findings"
+            jq -e '.matches | length == 0' "$RUNNER_TEMP/grype.json"
+          done
